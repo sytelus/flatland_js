@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Flatland — a 2D world seen in 1D</title>
+<style>
+  body      { margin: 0; background: #111; color: #ccc; font-family: monospace;
+              display: flex; flex-direction: column; align-items: center; }
+  canvas    { margin-top: 10px; border: 1px solid #444; }
+  #help     { display: none; position: fixed; top: 60px; padding: 20px;
+              background: #000d; border: 1px solid #666; line-height: 1.6; }
+  #help.on  { display: block; }
+</style>
+</head>
+<body>
+
+<canvas id="view" width="800" height="120"></canvas>
+<canvas id="map"  width="800" height="500"></canvas>
+
+<div id="help">
+  <b>FLATLAND</b> — you are a dot in a 2D world, so you see in 1D.<br>
+  The top strip is your eye: one column per ray cast from your position.<br>
+  Nearer objects appear brighter; farther ones fade into darkness.<br><br>
+  <b>W / &uarr;</b> move forward &nbsp; <b>S / &darr;</b> move backward<br>
+  <b>A / &larr;</b> turn left &nbsp;&nbsp;&nbsp;&nbsp; <b>D / &rarr;</b> turn right<br>
+  <b>Mouse drag on strip</b> turn &nbsp; <b>Click on map</b> teleport<br>
+  <b>F1</b> toggle this help
+</div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- The world
+// The world is a list of shapes. Internally everything is reduced to just
+// two primitives that a ray can hit: line segments and circles.
+
+const segments = [];   // {x1, y1, x2, y2, color}
+const circles  = [];   // {cx, cy, r, color}
+
+function addLine(x1, y1, x2, y2, color) { segments.push({x1, y1, x2, y2, color}); }
+function addCircle(cx, cy, r, color)    { circles.push({cx, cy, r, color}); }
+function addPolygon(points, color) {     // a polygon is just its edge segments
+  for (let i = 0; i < points.length; i++) {
+    const [x1, y1] = points[i], [x2, y2] = points[(i + 1) % points.length];
+    addLine(x1, y1, x2, y2, color);
+  }
+}
+
+// Outer walls, then some furniture for our flat world.
+addPolygon([[10, 10], [790, 10], [790, 490], [10, 490]], '#888888');
+addPolygon([[150, 100], [280, 120], [230, 230]],          '#ff5050');  // triangle
+addPolygon([[500, 80], [620, 80], [620, 180], [500, 180]],'#50b0ff');  // square
+addCircle(400, 300, 50,                                   '#50ff90');  // circle
+addCircle(650, 380, 30,                                   '#ffd050');  // circle
+addLine(100, 380, 250, 420,                               '#ff50ff');  // lone wall
+
+// ---------------------------------------------------------------- The player
+const player = {
+  x: 400, y: 430,          // position in the world
+  angle: -Math.PI / 2,     // facing direction (radians)
+  fov: Math.PI / 3,        // field of view: 60 degrees
+  moveSpeed: 2.5,          // world units per frame
+  turnSpeed: 0.04,         // radians per frame
+};
+
+// ---------------------------------------------------------------- Raycasting
+// A ray starts at (ox, oy) and travels along direction (dx, dy).
+// Each intersection test returns the distance t along the ray, or Infinity.
+
+function raySegmentDist(ox, oy, dx, dy, s) {
+  // Solve: origin + t*dir == segStart + u*(segEnd - segStart), 0 <= u <= 1
+  const ex = s.x2 - s.x1, ey = s.y2 - s.y1;
+  const denom = dx * ey - dy * ex;
+  if (Math.abs(denom) < 1e-9) return Infinity;              // parallel
+  const t = ((s.x1 - ox) * ey - (s.y1 - oy) * ex) / denom;
+  const u = ((s.x1 - ox) * dy - (s.y1 - oy) * dx) / denom;
+  return (t > 0 && u >= 0 && u <= 1) ? t : Infinity;
+}
+
+function rayCircleDist(ox, oy, dx, dy, c) {
+  // Substitute the ray equation into the circle equation -> quadratic in t.
+  const fx = ox - c.cx, fy = oy - c.cy;
+  const b = fx * dx + fy * dy;
+  const disc = b * b - (fx * fx + fy * fy - c.r * c.r);
+  if (disc < 0) return Infinity;                            // ray misses circle
+  const t = -b - Math.sqrt(disc);                           // nearer of two hits
+  return t > 0 ? t : Infinity;
+}
+
+// Cast one ray and return the closest thing it hits.
+function castRay(ox, oy, angle) {
+  const dx = Math.cos(angle), dy = Math.sin(angle);
+  let best = {dist: Infinity, color: null};
+  for (const s of segments) {
+    const d = raySegmentDist(ox, oy, dx, dy, s);
+    if (d < best.dist) best = {dist: d, color: s.color};
+  }
+  for (const c of circles) {
+    const d = rayCircleDist(ox, oy, dx, dy, c);
+    if (d < best.dist) best = {dist: d, color: c.color};
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------- Rendering
+const viewCanvas = document.getElementById('view'), viewCtx = viewCanvas.getContext('2d');
+const mapCanvas  = document.getElementById('map'),  mapCtx  = mapCanvas.getContext('2d');
+
+// The 1D view: one ray per pixel column, drawn as a full-height column.
+// Brightness falls off with distance so depth is visible in the strip.
+function drawView() {
+  viewCtx.fillStyle = '#000';
+  viewCtx.fillRect(0, 0, viewCanvas.width, viewCanvas.height);
+  for (let col = 0; col < viewCanvas.width; col++) {
+    const rayAngle = player.angle + player.fov * (col / viewCanvas.width - 0.5);
+    const hit = castRay(player.x, player.y, rayAngle);
+    if (hit.dist === Infinity) continue;
+    const brightness = Math.max(0.1, 1 - hit.dist / 500);
+    viewCtx.fillStyle = hit.color;
+    viewCtx.globalAlpha = brightness;
+    viewCtx.fillRect(col, 0, 1, viewCanvas.height);
+  }
+  viewCtx.globalAlpha = 1;
+}
+
+// The 2D map: all shapes, plus the player and their field-of-view wedge.
+function drawMap() {
+  mapCtx.fillStyle = '#000';
+  mapCtx.fillRect(0, 0, mapCanvas.width, mapCanvas.height);
+
+  mapCtx.lineWidth = 2;
+  for (const s of segments) {
+    mapCtx.strokeStyle = s.color;
+    mapCtx.beginPath();
+    mapCtx.moveTo(s.x1, s.y1);
+    mapCtx.lineTo(s.x2, s.y2);
+    mapCtx.stroke();
+  }
+  for (const c of circles) {
+    mapCtx.strokeStyle = c.color;
+    mapCtx.beginPath();
+    mapCtx.arc(c.cx, c.cy, c.r, 0, 2 * Math.PI);
+    mapCtx.stroke();
+  }
+
+  // Field-of-view wedge: shade the region the player can currently see.
+  mapCtx.fillStyle = '#ffffff22';
+  mapCtx.beginPath();
+  mapCtx.moveTo(player.x, player.y);
+  mapCtx.arc(player.x, player.y, 120,
+             player.angle - player.fov / 2, player.angle + player.fov / 2);
+  mapCtx.fill();
+
+  // The player is just a dot.
+  mapCtx.fillStyle = '#fff';
+  mapCtx.beginPath();
+  mapCtx.arc(player.x, player.y, 4, 0, 2 * Math.PI);
+  mapCtx.fill();
+}
+
+// ---------------------------------------------------------------- Input
+const keys = new Set();
+addEventListener('keydown', e => {
+  if (e.key === 'F1') {
+    e.preventDefault();
+    document.getElementById('help').classList.toggle('on');
+  }
+  keys.add(e.key.toLowerCase());
+});
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+
+// Mouse: drag on the view strip to turn, click on the map to teleport.
+let dragging = false;
+viewCanvas.addEventListener('mousedown', () => dragging = true);
+addEventListener('mouseup', () => dragging = false);
+addEventListener('mousemove', e => { if (dragging) player.angle += e.movementX * 0.005; });
+mapCanvas.addEventListener('click', e => {
+  const rect = mapCanvas.getBoundingClientRect();
+  player.x = e.clientX - rect.left;
+  player.y = e.clientY - rect.top;
+});
+
+// Move the player, but stop short of anything solid (a cast ray tells us
+// how much free space lies in the direction of travel).
+function move(direction) {
+  const step = player.moveSpeed * direction;
+  const angle = player.angle + (direction < 0 ? Math.PI : 0);
+  if (castRay(player.x, player.y, angle).dist > Math.abs(step) + 5) {
+    player.x += Math.cos(player.angle) * step;
+    player.y += Math.sin(player.angle) * step;
+  }
+}
+
+function handleInput() {
+  if (keys.has('w') || keys.has('arrowup'))    move(+1);
+  if (keys.has('s') || keys.has('arrowdown'))  move(-1);
+  if (keys.has('a') || keys.has('arrowleft'))  player.angle -= player.turnSpeed;
+  if (keys.has('d') || keys.has('arrowright')) player.angle += player.turnSpeed;
+}
+
+// ---------------------------------------------------------------- Game loop
+function frame() {
+  handleInput();
+  drawView();
+  drawMap();
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
